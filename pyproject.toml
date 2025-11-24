@@ -28,6 +28,7 @@ classifiers = [
 ]
 readme = "README.md"
 dependencies = [
+    "maturin>=1.10.2",
     "tox>=4.32.0",
 ]
 
