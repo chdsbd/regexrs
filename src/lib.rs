@@ -1,5 +1,5 @@
 use pyo3::prelude::*;
-use pyo3::types::{PyNone, PyTuple};
+use pyo3::types::PyTuple;
 use regex;
 
 #[pyclass(module = "regexrs")]
@@ -21,26 +21,26 @@ struct Match {
 #[pymethods]
 impl Match {
     #[pyo3(signature = (*args))]
-    fn group(&self, py: Python<'_>, args: &PyTuple) -> PyResult<PyObject> {
+    fn group(&self, py: Python<'_>, args: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
         let caps = self
             .re
             .regex
             .captures(&self.string)
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>("No match found"))?;
 
-        if args.is_empty() {
+        if args.len() == 0 {
             // No arguments, return the whole match (group 0)
             return Ok(caps
                 .get(0)
-                .map_or_else(|| py.None(), |m| m.as_str().into_py(py)));
+                .map_or_else(|| py.None(), |m| m.as_str().into_pyobject(py).unwrap().unbind().into()));
         }
 
-        let groups: Vec<PyObject> = args
+        let groups: Vec<Py<PyAny>> = args
             .iter()
             .map(|g| match g.extract::<usize>() {
                 Ok(index) => caps
                     .get(index)
-                    .map_or_else(|| py.None(), |m| m.as_str().into_py(py)),
+                    .map_or_else(|| py.None(), |m| m.as_str().into_pyobject(py).unwrap().unbind().into()),
                 Err(_) => py.None(),
             })
             .collect();
@@ -48,28 +48,27 @@ impl Match {
         if groups.len() == 1 {
             Ok(groups[0].clone_ref(py))
         } else {
-            let tuple = PyTuple::new(py, &groups);
-            Ok(tuple.to_object(py))
+            Ok(PyTuple::new(py, &groups)?.unbind().into())
         }
     }
 
-    fn groups(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn groups(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let caps = self
             .re
             .regex
             .captures(&self.string)
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>("No match found"))?;
 
-        let groups: Vec<PyObject> = caps
+        let groups: Vec<Py<PyAny>> = caps
             .iter()
             .skip(1) // Skip the entire match which is at index 0
             .map(|m| match m {
-                Some(matched) => matched.as_str().into_py(py),
+                Some(matched) => matched.as_str().into_pyobject(py).unwrap().unbind().into(),
                 None => py.None(),
             })
             .collect();
 
-        Ok(PyTuple::new(py, &groups).to_object(py))
+        Ok(PyTuple::new(py, &groups)?.unbind().into())
     }
 
     fn end(&self) -> PyResult<usize> {
@@ -138,7 +137,7 @@ fn get_byte_to_code_point(haystack: &str) -> Vec<usize> {
 
 #[pymethods]
 impl Pattern {
-
+    #[pyo3(signature = (string, pos=None))]
     pub fn r#match(&self, string: String, pos: Option<usize>) -> PyResult<Option<Match>> {
         if string.is_empty() {
             return Ok(None)
@@ -170,6 +169,39 @@ impl Pattern {
             }
         }
         Ok(None) // No match found or the match does not start at 'p'
+    }
+
+    #[pyo3(signature = (string, pos=None))]
+    pub fn search(&self, string: String, pos: Option<usize>) -> PyResult<Option<Match>> {
+        if string.is_empty() {
+            return Ok(None)
+        }
+
+        let (byte_to_code_point, code_point_to_byte) = get_byte_to_code_point_and_reverse(string.as_str());
+        let p = code_point_to_byte[pos.unwrap_or(0)];
+
+        // Unlike match, search scans through the string starting at pos
+        if let Some(caps) = self.regex.captures_at(&string, p) {
+            if let Some(matched) = caps.get(0) {
+                // Extract the name of the last matched group
+                let last_group_name = self.regex.capture_names()
+                    .filter_map(|name| name) // Skip None values for unnamed groups
+                    .filter_map(|name| {
+                        // Only consider the group if it has a match
+                        caps.name(name).map(|_| name.to_string())
+                    })
+                    .last(); // Get the last group that had a match
+
+                return Ok(Some(Match {
+                    string: String::from(matched.as_str()),
+                    re: self.clone(),
+                    pos: byte_to_code_point[matched.start()],
+                    endpos: byte_to_code_point[matched.end()],
+                    lastgroup: last_group_name,
+                }));
+            }
+        }
+        Ok(None) // No match found
     }
 
 
@@ -220,6 +252,7 @@ fn python_regex_flags_to_inline(pattern: &str, flags: i32) -> String {
 }
 
 #[pyfunction]
+#[pyo3(signature = (pattern, flags=None))]
 fn compile(pattern: &str, flags: Option<i32>) -> Pattern {
     match flags {
         Some(given_flags) => Pattern::new(python_regex_flags_to_inline(pattern, given_flags).as_str()),
@@ -228,9 +261,10 @@ fn compile(pattern: &str, flags: Option<i32>) -> Pattern {
 }
 
 #[pyfunction]
+#[pyo3(signature = (pattern, string, flags=None))]
 fn findall(
     py: Python,
-    pattern: PyObject,
+    pattern: Py<PyAny>,
     string: String,
     flags: Option<i32>,
 ) -> PyResult<Vec<String>> {
@@ -276,9 +310,10 @@ fn findall(
 }
 
 #[pyfunction]
+#[pyo3(signature = (pattern, string, flags=None))]
 fn r#match(
     py: Python,
-    pattern: PyObject,
+    pattern: Py<PyAny>,
     string: String,
     flags: Option<i32>,
 ) -> PyResult<Option<Match>> {
@@ -341,9 +376,73 @@ fn r#match(
 }
 
 #[pyfunction]
+#[pyo3(signature = (pattern, string, flags=None))]
+fn search(
+    py: Python,
+    pattern: Py<PyAny>,
+    string: String,
+    flags: Option<i32>,
+) -> PyResult<Option<Match>> {
+    let re: regex::Regex = if let Ok(s) = pattern.extract::<&str>(py) {
+        if string.is_empty() {
+            return Ok(None)
+        }
+        match flags {
+            Some(given_flags) => {
+                regex::Regex::new(python_regex_flags_to_inline(s, given_flags).as_str())
+                    .map_err(|e| {
+                        PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                            "Invalid regex pattern: {}",
+                            e
+                        ))
+                    })?
+            }
+            None => regex::Regex::new(s).map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Invalid regex pattern: {}",
+                    e
+                ))
+            })?,
+        }
+    } else if let Ok(pat) = pattern.extract::<Pattern>(py) {
+        match flags {
+            Some(_) => {
+                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "Cannot use flags with compiled pattern",
+                ));
+            }
+            None => pat.regex,
+        }
+    } else {
+        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Pattern must be a string or a Pattern object"));
+    };
+
+    // search scans through the string looking for any match
+    if let Some(caps) = re.captures(&string) {
+        if let Some(matched) = caps.get(0) {
+            let last_group_name = re.capture_names()
+                .filter_map(|name| name)
+                .filter_map(|name| caps.name(name).map(|_| name.to_string()))
+                .last();
+            let byte_to_code_point = get_byte_to_code_point(&string);
+
+            return Ok(Some(Match {
+                string: String::from(matched.as_str()),
+                re: Pattern { regex: re },
+                pos: byte_to_code_point[matched.start()],
+                endpos: byte_to_code_point[matched.end()],
+                lastgroup: last_group_name,
+            }));
+        }
+    }
+    Ok(None) // No match found
+}
+
+#[pyfunction]
+#[pyo3(signature = (pattern, string, flags=None))]
 fn fullmatch(
     py: Python,
-    pattern: PyObject,
+    pattern: Py<PyAny>,
     string: String,
     flags: Option<i32>,
 ) -> PyResult<Option<Match>> {
@@ -411,32 +510,23 @@ fn escape(pattern: &str) -> PyResult<String> {
 
 #[pymodule]
 #[pyo3(name = "regexrs")]
-fn regexrs(py: Python, m: &PyModule) -> PyResult<()> {
+fn regexrs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Pattern>()?;
     m.add_class::<Match>()?;
-    m.add("NOFLAG", 0);
-    m.add("IGNORECASE", 2);
-    m.add("I", 2);
-    m.add("MULTILINE", 8);
-    m.add("M", 8);
-    m.add("DOTALL", 16);
-    m.add("S", 16);
-    m.add("VERBOSE", 64);
-    m.add("X", 64);
-    let compile_func = wrap_pyfunction!(compile, m)?;
-    let findall_func = wrap_pyfunction!(findall, m)?;
-    let match_func = wrap_pyfunction!(r#match, m)?;
-    let fullmatch_func = wrap_pyfunction!(fullmatch, m)?;
-    let escape_func = wrap_pyfunction!(escape, m)?;
-    compile_func.setattr("__module__", "regexrs");
-    findall_func.setattr("__module__", "regexrs");
-    match_func.setattr("__module__", "regexrs");
-    fullmatch_func.setattr("__module__", "regexrs");
-    escape_func.setattr("__module__", "regexrs");
-    m.add_function(compile_func)?;
-    m.add_function(findall_func)?;
-    m.add_function(match_func)?;
-    m.add_function(fullmatch_func)?;
-    m.add_function(escape_func)?;
+    m.add("NOFLAG", 0)?;
+    m.add("IGNORECASE", 2)?;
+    m.add("I", 2)?;
+    m.add("MULTILINE", 8)?;
+    m.add("M", 8)?;
+    m.add("DOTALL", 16)?;
+    m.add("S", 16)?;
+    m.add("VERBOSE", 64)?;
+    m.add("X", 64)?;
+    m.add_function(wrap_pyfunction!(compile, m)?)?;
+    m.add_function(wrap_pyfunction!(findall, m)?)?;
+    m.add_function(wrap_pyfunction!(r#match, m)?)?;
+    m.add_function(wrap_pyfunction!(search, m)?)?;
+    m.add_function(wrap_pyfunction!(fullmatch, m)?)?;
+    m.add_function(wrap_pyfunction!(escape, m)?)?;
     Ok(())
 }
