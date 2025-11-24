@@ -56,3 +56,55 @@ def test_fullmatch_does_not_match():
 
 def test_fullmatch_fn():
     assert re.fullmatch(r'\w+', 'foo') is not None
+
+
+def test_search_fn_finds_match():
+    # search should find a match anywhere in the string
+    match = re.search(r'world', 'hello world')
+    assert match is not None
+    assert match.group() == 'world'
+    assert match.pos == 6
+    assert match.endpos == 11
+
+
+def test_search_fn_does_not_find_match():
+    # search should return None when no match is found
+    assert re.search(r'xyz', 'hello world') is None
+
+
+def test_search_pattern_finds_match():
+    # Pattern.search should find a match anywhere in the string
+    pattern = re.compile(r'world')
+    match = pattern.search('hello world')
+    assert match is not None
+    assert match.group() == 'world'
+
+
+def test_search_pattern_with_pos():
+    # Pattern.search with pos should start searching from that position
+    pattern = re.compile(r'foo')
+    match = pattern.search('foo bar foo', pos=4)
+    assert match is not None
+    assert match.pos == 8  # Second 'foo' starts at position 8
+
+
+def test_search_vs_match_difference():
+    # match only matches at the beginning, search finds anywhere
+    pattern = re.compile(r'world')
+    assert pattern.match('hello world') is None  # no match at start
+    assert pattern.search('hello world') is not None  # finds match in middle
+
+
+def test_search_with_groups():
+    # search should work with capture groups
+    match = re.search(r'(\w+) (\w+)', 'say hello world')
+    assert match is not None
+    assert match.group() == 'say hello'  # Matches the first two words
+    assert match.groups() == ('say', 'hello')
+
+
+def test_search_with_flags():
+    # search should work with flags
+    match = re.search(r'WORLD', 'hello world', re.I)
+    assert match is not None
+    assert match.group() == 'world'

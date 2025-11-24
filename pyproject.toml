@@ -27,6 +27,9 @@ classifiers = [
     'Operating System :: MacOS',
 ]
 readme = "README.md"
+dependencies = [
+    "tox>=4.32.0",
+]
 
 [project.urls]
 Homepage = 'https://github.com/spyoungtech/regexrs'
